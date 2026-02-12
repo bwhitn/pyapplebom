@@ -137,7 +137,7 @@ This repo includes a release workflow at `.github/workflows/release.yml` that:
 - builds wheels for:
   - Linux `x86_64` and `aarch64`
   - Windows `x86_64` and `aarch64`
-  - macOS `x86_64` and `aarch64`
+  - macOS `universal2` (single wheel supporting `x86_64` and `arm64`)
 - builds an sdist
 - verifies the tag version matches both `pyproject.toml` and `Cargo.toml`
 - publishes to PyPI on tags matching `v*` (for example `v0.1.0`)
