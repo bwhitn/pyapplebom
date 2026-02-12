@@ -29,8 +29,17 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install maturin pytest
 
-      - name: Build extension in editable env
-        run: maturin develop --release
+      - name: Build wheel
+        run: maturin build --release --out dist
+
+      - name: Install wheel
+        run: >
+          python -c "import glob, subprocess, sys;
+          wheels = sorted(glob.glob('dist/*.whl'));
+          assert wheels, 'No wheel built in dist/';
+          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--force-reinstall', wheels[0]])"
 
       - name: Run tests
-        run: pytest -q
+        run: |
+          cd tests
+          pytest -q
