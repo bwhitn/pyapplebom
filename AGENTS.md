@@ -46,7 +46,7 @@ python -m ruff check .
 python -m ruff format --check .
 python -m mypy
 zizmor --offline --strict-collection --min-severity=medium .
-python -m pip_audit --local --strict --progress-spinner=off
+python -m pip_audit --requirement <(python -m pip freeze --all --exclude-editable) --no-deps --strict --progress-spinner=off
 python -m pytest --cov=pyapplebom --cov-report=term-missing
 cargo audit --deny warnings --file Cargo.lock
 maturin build --release --locked --out dist

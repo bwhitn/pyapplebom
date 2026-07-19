@@ -66,7 +66,10 @@ jobs:
         run: zizmor --offline --strict-collection --min-severity=medium .
 
       - name: Audit Python dependencies
-        run: python -m pip_audit --local --strict --progress-spinner=off
+        run: >-
+          python -m pip_audit --requirement
+          <(python -m pip freeze --all --exclude-editable)
+          --no-deps --strict --progress-spinner=off
 
       - name: Test Python with branch coverage
         run: python -m pytest --cov=pyapplebom --cov-report=term-missing

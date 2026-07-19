@@ -94,7 +94,7 @@ def test_include_blocks_false_returns_none() -> None:
 
 
 def test_public_metadata_and_limits_are_exposed() -> None:
-    assert pyapplebom.__version__ == "0.1.0"
+    assert pyapplebom.__version__ == "0.1.1"
     assert pyapplebom.DEFAULT_MAX_INPUT_BYTES == 128 * 1024 * 1024
     assert pyapplebom.DEFAULT_MAX_PATHS == 250_000
 
