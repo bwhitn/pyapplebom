@@ -60,21 +60,34 @@ print(bom["paths"][0]["symbolic_mode"])  # e.g. drwxr-xr-x
 
 ## API
 
-### `parse_bom(data, *, include_blocks=True, include_raw_block_bytes=False)`
+### `parse_bom(data, *, include_blocks=True, include_raw_block_bytes=False, max_input_bytes=134217728, max_paths=250000)`
 
 Parse BOM content from bytes-like input.
 
-### `parse_bom_bytes(data, *, include_blocks=True, include_raw_block_bytes=False)`
+### `parse_bom_bytes(data, *, include_blocks=True, include_raw_block_bytes=False, max_input_bytes=134217728, max_paths=250000)`
 
 Alias of `parse_bom`.
 
-### `parse_bom_file(path, *, include_blocks=True, include_raw_block_bytes=False)`
+### `parse_bom_file(path, *, include_blocks=True, include_raw_block_bytes=False, max_input_bytes=134217728, max_paths=250000)`
 
 Parse BOM content from a file path.
+
+All parsing functions also accept these keyword-only resource limits:
+
+- `max_input_bytes=134217728`: maximum input size (128 MiB)
+- `max_paths=250000`: maximum declared or traversed paths per optional path section
+
+The defaults are exported as `pyapplebom.DEFAULT_MAX_INPUT_BYTES` and `pyapplebom.DEFAULT_MAX_PATHS`. Increase them explicitly only when parsing a trusted BOM that legitimately exceeds a default.
 
 ### Exceptions
 
 - `pyapplebom.BomParseError`: Raised for BOM parsing errors.
+
+## Security Model
+
+BOM files are treated as untrusted binary input. Before invoking the upstream parser, `pyapplebom` validates the file magic, index and block ranges, count-to-size relationships, path references, traversal cycles, expanded path data, and configured resource limits. Unexpected upstream Rust panics are contained and converted into parse errors.
+
+Invalid top-level layout and resource amplification raise `BomParseError`. An invalid optional section such as `Paths` is returned as `None` with details in `parse_errors`, allowing safe metadata from other sections to remain available. Resource limits bound in-process work; they are not an operating-system sandbox for adversarial parsing.
 
 ## Return Structure
 
@@ -111,9 +124,25 @@ Run tests:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .[test]
-pytest -q
+python -m pip install -e '.[dev]'
+python -m pytest --cov=pyapplebom --cov-report=term-missing
 ```
+
+Run the full local quality and security suite:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-targets --all-features --locked
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy
+zizmor --offline --strict-collection --min-severity=medium .
+python -m pip_audit --requirement <(python -m pip freeze --all --exclude-editable) --no-deps --strict --progress-spinner=off
+cargo audit --deny warnings --file Cargo.lock
+```
+
+CI additionally measures `src/validation.rs` with `cargo-llvm-cov` and requires at least 80% line coverage. Python branch coverage is required to remain at 100%.
 
 ## Build and Publish (manual PyPI workflow)
 
@@ -123,10 +152,11 @@ Build wheels and source distribution:
 python -m venv .venv
 source .venv/bin/activate
 pip install maturin
-maturin build --release
+maturin build --release --locked --out dist
+maturin sdist --out dist
 ```
 
-Artifacts are placed in `target/wheels/`.
+Artifacts are placed in `dist/`.
 
 Publish manually with your preferred process (for example `twine upload`) after validating test/build outputs.
 
@@ -145,6 +175,7 @@ This repo includes a release workflow at `.github/workflows/release.yml` that:
 ## Compatibility Notes
 
 - Uses `pyo3` with `abi3` (`abi3-py38`) for broad CPython binary compatibility.
+- CI runs dependency-free installed-wheel smoke tests on Python 3.8 and the full test suite on a maintained Python release.
 - No platform-specific runtime logic is required for parsing.
 - Build targets are suitable for Windows, Linux, and macOS when compiled on those platforms.
 

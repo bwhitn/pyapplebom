@@ -1,10 +1,10 @@
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
+requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "pyapplebom"
-version = "0.1.0"
+version = "0.1.1"
 description = "Parse Apple BOM files using the Rust apple-bom parser"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -33,7 +33,19 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7.0"]
+test = [
+    "pytest>=9.0.3; python_version >= '3.10'",
+    "pytest-cov>=7.0; python_version >= '3.10'",
+]
+dev = [
+    "maturin>=1.9,<2.0",
+    "mypy>=1.15,<1.17",
+    "pip-audit==2.10.1; python_version >= '3.10'",
+    "pytest>=9.0.3; python_version >= '3.10'",
+    "pytest-cov>=7.0; python_version >= '3.10'",
+    "ruff>=0.11,<1.0",
+    "zizmor==1.27.0; python_version >= '3.10'",
+]
 
 [project.urls]
 Repository = "https://github.com/bwhitn/pyapplebom.git"
@@ -43,3 +55,40 @@ Issues = "https://github.com/bwhitn/pyapplebom/issues"
 python-source = "."
 module-name = "pyapplebom._native"
 features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers", "-ra"]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["pyapplebom"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+extend-exclude = ["tests/fixtures"]
+
+[tool.ruff.lint]
+select = ["B", "C4", "E", "F", "I", "PIE", "PT", "RUF", "S", "SIM", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.mypy]
+files = ["pyapplebom", "tests"]
+python_version = "3.8"
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["pytest", "_pytest", "_pytest.*"]
+follow_imports = "skip"

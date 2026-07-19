@@ -4,42 +4,132 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
 jobs:
-  test:
+  quality:
+    name: lint, type, test, and coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy,llvm-tools-preview,rustfmt
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install project and development dependencies
+        run: |
+          python -m pip install --upgrade "pip==26.1.2"
+          python -m pip install -e ".[dev]"
+
+      - name: Install native coverage tool
+        run: cargo install cargo-llvm-cov --version 0.7.0 --locked
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint Rust
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Test Rust and enforce validation coverage
+        run: >-
+          cargo llvm-cov --all-features --locked --summary-only
+          --ignore-filename-regex 'src/lib\.rs$' --fail-under-lines 80
+
+      - name: Lint and format-check Python
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+
+      - name: Type-check Python
+        run: python -m mypy
+
+      - name: Audit GitHub Actions definitions
+        run: zizmor --offline --strict-collection --min-severity=medium .
+
+      - name: Audit Python dependencies
+        run: >-
+          python -m pip_audit --requirement
+          <(python -m pip freeze --all --exclude-editable)
+          --no-deps --strict --progress-spinner=off
+
+      - name: Test Python with branch coverage
+        run: python -m pytest --cov=pyapplebom --cov-report=term-missing
+
+  wheel-test:
+    name: wheel ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.8", "3.12"]
+        python-version: ["3.8", "3.13"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: false
+
       - name: Install build and test dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install maturin pytest
+        run: uv pip install --system "maturin>=1.9,<2.0"
+
+      # Patched pytest releases require Python 3.10+. The dependency-free
+      # smoke test below retains runtime coverage for the abi3 Python 3.8 floor.
+      - name: Install full test dependencies
+        if: matrix.python-version != '3.8'
+        run: >-
+          uv pip install --system
+          "pytest>=9.0.3; python_version >= '3.10'"
+          "pytest-cov>=7.0; python_version >= '3.10'"
 
       - name: Build wheel
-        run: maturin build --release --out dist
+        run: maturin build --release --locked --out dist
 
       - name: Install wheel
-        run: >
+        run: >-
           python -c "import glob, subprocess, sys;
           wheels = sorted(glob.glob('dist/*.whl'));
           assert wheels, 'No wheel built in dist/';
-          subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--force-reinstall', wheels[0]])"
+          subprocess.check_call(['uv', 'pip', 'install', '--system', '--reinstall', wheels[0]])"
 
-      - name: Run tests
+      - name: Smoke-test the installed wheel
+        run: |
+          cd tests
+          python smoke.py
+
+      - name: Run full tests against installed wheel
+        if: matrix.python-version != '3.8'
         run: |
           cd tests
           pytest -q

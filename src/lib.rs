@@ -1,18 +1,23 @@
+mod validation;
+
 use apple_bom::{
     format::{BomBlock, ParsedBom},
     BomPath, BomPathType,
 };
 use pyo3::{
     create_exception,
-    exceptions::{PyException, PyOSError, PyTypeError},
+    exceptions::{PyException, PyOSError, PyTypeError, PyValueError},
     prelude::*,
     types::{PyDict, PyList},
     wrap_pyfunction, Bound,
 };
 use std::{
     any::Any,
+    fs::File,
+    io::Read,
     panic::{catch_unwind, AssertUnwindSafe},
 };
+use validation::{ParseLimits, DEFAULT_MAX_INPUT_BYTES, DEFAULT_MAX_PATHS};
 
 create_exception!(pyapplebom, BomParseError, PyException);
 
@@ -62,7 +67,7 @@ fn path_type_name(path_type: BomPathType) -> &'static str {
 }
 
 fn path_to_dict<'py>(py: Python<'py>, path: &BomPath) -> PyResult<Bound<'py, PyDict>> {
-    let item = PyDict::new_bound(py);
+    let item = PyDict::new(py);
     let path_type = path.path_type();
     let path_type_raw: u8 = path_type.into();
 
@@ -106,7 +111,7 @@ fn path_record_fields<'py>(
 }
 
 fn serialize_path_list<'py>(py: Python<'py>, paths: &[BomPath]) -> PyResult<Bound<'py, PyList>> {
-    let list = PyList::empty_bound(py);
+    let list = PyList::empty(py);
 
     for path in paths {
         list.append(path_to_dict(py, path)?)?;
@@ -128,7 +133,7 @@ fn append_block_entry<'py>(
         ))
     })?;
 
-    let block_dict = PyDict::new_bound(py);
+    let block_dict = PyDict::new(py);
     block_dict.set_item("index", index)?;
     block_dict.set_item("file_offset", entry.file_offset)?;
     block_dict.set_item("length", entry.length)?;
@@ -153,7 +158,9 @@ fn append_block_entry<'py>(
         return Ok(());
     }
 
-    match catch_unwind(AssertUnwindSafe(|| BomBlock::try_parse(bom, index))) {
+    match catch_unwind(AssertUnwindSafe(|| {
+        validation::parse_block_safely(bom, index)
+    })) {
         Err(payload) => {
             block_dict.set_item("kind", "Unknown")?;
             block_dict.set_item(
@@ -177,9 +184,9 @@ fn append_block_entry<'py>(
             block_dict.set_item("number_of_paths", info.number_of_paths)?;
             block_dict.set_item("number_of_info_entries", info.number_of_info_entries)?;
 
-            let entries = PyList::empty_bound(py);
+            let entries = PyList::empty(py);
             for info_entry in &info.entries {
-                let item = PyDict::new_bound(py);
+                let item = PyDict::new(py);
                 item.set_item("a", info_entry.a)?;
                 item.set_item("b", info_entry.b)?;
                 item.set_item("c", info_entry.c)?;
@@ -216,9 +223,9 @@ fn append_block_entry<'py>(
                 paths.previous_paths_block_index,
             )?;
 
-            let path_entries = PyList::empty_bound(py);
+            let path_entries = PyList::empty(py);
             for path in &paths.paths {
-                let item = PyDict::new_bound(py);
+                let item = PyDict::new(py);
                 item.set_item("block_index", path.block_index)?;
                 item.set_item("file_index", path.file_index)?;
                 path_entries.append(item)?;
@@ -258,8 +265,22 @@ fn parse_optional_path_section<'py>(
     doc: &Bound<'py, PyDict>,
     parse_errors: &Bound<'py, PyDict>,
     name: &str,
+    validation: Result<bool, String>,
     parser: impl FnOnce() -> Result<Vec<BomPath>, apple_bom::Error>,
 ) -> PyResult<()> {
+    match validation {
+        Ok(false) => {
+            doc.set_item(name, py.None())?;
+            return Ok(());
+        }
+        Err(err) => {
+            doc.set_item(name, py.None())?;
+            parse_errors.set_item(name, err)?;
+            return Ok(());
+        }
+        Ok(true) => {}
+    }
+
     match safe_bom_call(parser) {
         SafeBomCall::Value(paths) => {
             doc.set_item(name, serialize_path_list(py, &paths)?)?;
@@ -282,10 +303,22 @@ fn parse_bom_document<'py>(
     source_path: Option<&str>,
     include_blocks: bool,
     include_raw_block_bytes: bool,
+    limits: ParseLimits,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let bom = ParsedBom::parse(data).map_err(bom_error_to_py)?;
-    let doc = PyDict::new_bound(py);
-    let parse_errors = PyDict::new_bound(py);
+    validation::validate_container(data, limits, include_blocks).map_err(BomParseError::new_err)?;
+
+    let bom = match catch_unwind(AssertUnwindSafe(|| ParsedBom::parse(data))) {
+        Ok(Ok(bom)) => bom,
+        Ok(Err(err)) => return Err(bom_error_to_py(err)),
+        Err(payload) => {
+            return Err(BomParseError::new_err(format!(
+                "apple-bom parser panicked: {}",
+                panic_payload_to_string(payload)
+            )))
+        }
+    };
+    let doc = PyDict::new(py);
+    let parse_errors = PyDict::new(py);
 
     doc.set_item("format", "apple-bom")?;
     doc.set_item("byte_length", data.len())?;
@@ -294,7 +327,7 @@ fn parse_bom_document<'py>(
         doc.set_item("source_path", path)?;
     }
 
-    let header = PyDict::new_bound(py);
+    let header = PyDict::new(py);
     header.set_item(
         "magic",
         String::from_utf8_lossy(&bom.header.magic).to_string(),
@@ -307,11 +340,11 @@ fn parse_bom_document<'py>(
     header.set_item("vars_index_length", bom.header.vars_index_length)?;
     doc.set_item("header", header)?;
 
-    let blocks_index = PyDict::new_bound(py);
+    let blocks_index = PyDict::new(py);
     blocks_index.set_item("count", bom.blocks.count)?;
-    let block_entries = PyList::empty_bound(py);
+    let block_entries = PyList::empty(py);
     for (index, entry) in bom.blocks.blocks.iter().enumerate() {
-        let item = PyDict::new_bound(py);
+        let item = PyDict::new(py);
         item.set_item("index", index)?;
         item.set_item("file_offset", entry.file_offset)?;
         item.set_item("length", entry.length)?;
@@ -320,9 +353,9 @@ fn parse_bom_document<'py>(
     blocks_index.set_item("entries", block_entries)?;
     doc.set_item("blocks_index", blocks_index)?;
 
-    let variables = PyList::empty_bound(py);
+    let variables = PyList::empty(py);
     for var in &bom.vars.vars {
-        let item = PyDict::new_bound(py);
+        let item = PyDict::new(py);
         item.set_item("name", &var.name)?;
         item.set_item("name_length", var.name_length)?;
         item.set_item("block_index", var.block_index)?;
@@ -330,42 +363,79 @@ fn parse_bom_document<'py>(
     }
     doc.set_item("variables", variables)?;
 
-    match safe_bom_call(|| bom.bom_info()) {
-        SafeBomCall::Value(info) => {
-            let info_dict = PyDict::new_bound(py);
-            info_dict.set_item("version", info.version)?;
-            info_dict.set_item("number_of_paths", info.number_of_paths)?;
-            info_dict.set_item("number_of_info_entries", info.number_of_info_entries)?;
-
-            let entries = PyList::empty_bound(py);
-            for info_entry in &info.entries {
-                let item = PyDict::new_bound(py);
-                item.set_item("a", info_entry.a)?;
-                item.set_item("b", info_entry.b)?;
-                item.set_item("c", info_entry.c)?;
-                item.set_item("d", info_entry.d)?;
-                entries.append(item)?;
-            }
-            info_dict.set_item("entries", entries)?;
-
-            doc.set_item("bom_info", info_dict)?;
-        }
-        SafeBomCall::MissingVariable => {
+    match validation::validate_bom_info(&bom) {
+        Ok(false) => {
             doc.set_item("bom_info", py.None())?;
         }
-        SafeBomCall::Error(err) => {
+        Err(err) => {
             doc.set_item("bom_info", py.None())?;
             parse_errors.set_item("bom_info", err)?;
         }
+        Ok(true) => match safe_bom_call(|| bom.bom_info()) {
+            SafeBomCall::Value(info) => {
+                let info_dict = PyDict::new(py);
+                info_dict.set_item("version", info.version)?;
+                info_dict.set_item("number_of_paths", info.number_of_paths)?;
+                info_dict.set_item("number_of_info_entries", info.number_of_info_entries)?;
+
+                let entries = PyList::empty(py);
+                for info_entry in &info.entries {
+                    let item = PyDict::new(py);
+                    item.set_item("a", info_entry.a)?;
+                    item.set_item("b", info_entry.b)?;
+                    item.set_item("c", info_entry.c)?;
+                    item.set_item("d", info_entry.d)?;
+                    entries.append(item)?;
+                }
+                info_dict.set_item("entries", entries)?;
+
+                doc.set_item("bom_info", info_dict)?;
+            }
+            SafeBomCall::MissingVariable => {
+                doc.set_item("bom_info", py.None())?;
+            }
+            SafeBomCall::Error(err) => {
+                doc.set_item("bom_info", py.None())?;
+                parse_errors.set_item("bom_info", err)?;
+            }
+        },
     }
 
-    parse_optional_path_section(py, &doc, &parse_errors, "paths", || bom.paths())?;
-    parse_optional_path_section(py, &doc, &parse_errors, "hl_index", || bom.hl_index())?;
-    parse_optional_path_section(py, &doc, &parse_errors, "size64", || bom.size64())?;
-    parse_optional_path_section(py, &doc, &parse_errors, "vindex", || bom.vindex())?;
+    parse_optional_path_section(
+        py,
+        &doc,
+        &parse_errors,
+        "paths",
+        validation::validate_path_section(&bom, "Paths", limits),
+        || bom.paths(),
+    )?;
+    parse_optional_path_section(
+        py,
+        &doc,
+        &parse_errors,
+        "hl_index",
+        validation::validate_path_section(&bom, "HLIndex", limits),
+        || bom.hl_index(),
+    )?;
+    parse_optional_path_section(
+        py,
+        &doc,
+        &parse_errors,
+        "size64",
+        validation::validate_path_section(&bom, "Size64", limits),
+        || bom.size64(),
+    )?;
+    parse_optional_path_section(
+        py,
+        &doc,
+        &parse_errors,
+        "vindex",
+        validation::validate_path_section(&bom, "VIndex", limits),
+        || bom.vindex(),
+    )?;
 
     if include_blocks {
-        let blocks = PyList::empty_bound(py);
+        let blocks = PyList::empty(py);
         for index in 0..bom.blocks.blocks.len() {
             append_block_entry(py, &bom, index, include_raw_block_bytes, &blocks)?;
         }
@@ -383,42 +453,100 @@ fn parse_bom_document<'py>(
     Ok(doc)
 }
 
-#[pyfunction(signature = (data, *, include_blocks = true, include_raw_block_bytes = false))]
-fn parse_bom_bytes(
-    py: Python<'_>,
+fn parse_limits(max_input_bytes: usize, max_paths: usize) -> PyResult<ParseLimits> {
+    if max_input_bytes == 0 {
+        return Err(PyValueError::new_err(
+            "max_input_bytes must be greater than zero",
+        ));
+    }
+    if max_paths == 0 {
+        return Err(PyValueError::new_err("max_paths must be greater than zero"));
+    }
+
+    Ok(ParseLimits {
+        max_input_bytes,
+        max_paths,
+    })
+}
+
+fn read_file_limited(path: &str, max_input_bytes: usize) -> PyResult<Vec<u8>> {
+    let file = File::open(path)
+        .map_err(|err| PyOSError::new_err(format!("failed opening {path}: {err}")))?;
+    let metadata = file
+        .metadata()
+        .map_err(|err| PyOSError::new_err(format!("failed reading metadata for {path}: {err}")))?;
+    let max_input_u64 = u64::try_from(max_input_bytes).unwrap_or(u64::MAX);
+
+    if metadata.len() > max_input_u64 {
+        return Err(BomParseError::new_err(format!(
+            "BOM input is {} bytes, exceeding max_input_bytes={max_input_bytes}",
+            metadata.len()
+        )));
+    }
+
+    let capacity = usize::try_from(metadata.len()).unwrap_or(max_input_bytes);
+    let mut data = Vec::with_capacity(capacity);
+    file.take(max_input_u64.saturating_add(1))
+        .read_to_end(&mut data)
+        .map_err(|err| PyOSError::new_err(format!("failed reading {path}: {err}")))?;
+
+    if data.len() > max_input_bytes {
+        return Err(BomParseError::new_err(format!(
+            "BOM input exceeded max_input_bytes={max_input_bytes} while reading"
+        )));
+    }
+
+    Ok(data)
+}
+
+#[pyfunction(signature = (data, *, include_blocks = true, include_raw_block_bytes = false, max_input_bytes = 134217728, max_paths = 250000))]
+fn parse_bom_bytes<'py>(
+    py: Python<'py>,
     data: &[u8],
     include_blocks: bool,
     include_raw_block_bytes: bool,
-) -> PyResult<PyObject> {
-    let doc = parse_bom_document(py, data, None, include_blocks, include_raw_block_bytes)?;
-    Ok(doc.into_py(py))
+    max_input_bytes: usize,
+    max_paths: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    let limits = parse_limits(max_input_bytes, max_paths)?;
+    parse_bom_document(
+        py,
+        data,
+        None,
+        include_blocks,
+        include_raw_block_bytes,
+        limits,
+    )
 }
 
-#[pyfunction(signature = (path, *, include_blocks = true, include_raw_block_bytes = false))]
-fn parse_bom_file(
-    py: Python<'_>,
+#[pyfunction(signature = (path, *, include_blocks = true, include_raw_block_bytes = false, max_input_bytes = 134217728, max_paths = 250000))]
+fn parse_bom_file<'py>(
+    py: Python<'py>,
     path: &str,
     include_blocks: bool,
     include_raw_block_bytes: bool,
-) -> PyResult<PyObject> {
-    let data = std::fs::read(path)
-        .map_err(|err| PyOSError::new_err(format!("failed reading {path}: {err}")))?;
+    max_input_bytes: usize,
+    max_paths: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    let limits = parse_limits(max_input_bytes, max_paths)?;
+    let data = read_file_limited(path, max_input_bytes)?;
 
-    let doc = parse_bom_document(
+    parse_bom_document(
         py,
         &data,
         Some(path),
         include_blocks,
         include_raw_block_bytes,
-    )?;
-
-    Ok(doc.into_py(py))
+        limits,
+    )
 }
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    m.add("BomParseError", m.py().get_type_bound::<BomParseError>())?;
+    m.add("DEFAULT_MAX_INPUT_BYTES", DEFAULT_MAX_INPUT_BYTES)?;
+    m.add("DEFAULT_MAX_PATHS", DEFAULT_MAX_PATHS)?;
+    m.add("BomParseError", m.py().get_type::<BomParseError>())?;
     m.add_function(wrap_pyfunction!(parse_bom_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(parse_bom_file, m)?)?;
 
