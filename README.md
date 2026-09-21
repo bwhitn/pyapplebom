@@ -56,9 +56,9 @@ import pyapplebom
 
 bom = pyapplebom.parse_bom_file("/path/to/Bom")
 
-print(bom["header"]["magic"])        # BOMStore
-print(len(bom["paths"]))              # Number of parsed paths in the Paths tree
-print(bom["paths"][0]["path"])       # e.g. "."
+print(bom["header"]["magic"])  # BOMStore
+print(len(bom["paths"]))  # Number of parsed paths in the Paths tree
+print(bom["paths"][0]["path"])  # e.g. "."
 print(bom["paths"][0]["symbolic_mode"])  # e.g. drwxr-xr-x
 ```
 
