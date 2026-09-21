@@ -2,30 +2,25 @@
 
 ## Current
 
-- [ ] Finish the Rust 1.98.1 release and downstream ALES handoff — **The `0.1.2` release candidate passes every
-  local gate; hosted CI, publication, and the downstream handoff remain**:
-  - [x] Push modernization candidate `4c014a5914edc940ef531abbc935f4c82c64aef0` to `origin/master` with the
-    reproducible benchmark record and locally passing Rust, Python, security, coverage, audit, wheel, and sdist gates.
-  - [x] Apply Ruff's Markdown code-block formatting to `README.md` and rerun both `python -m ruff check .` and
-    `python -m ruff format --check .`. GitHub Actions run `35600677189`, job `106335761177`, reached a runner and
-    failed only because the example at `README.md:59` would be reformatted; this is a real gate failure, not the
-    account Actions-capacity rejection.
-  - [ ] Rerun the entire CI job after that fix, not only Ruff. The failed job stopped before mypy, zizmor, pip-audit,
-    and the Python branch-coverage suite. Require those steps plus Rust formatting/Clippy/tests/native coverage,
-    cargo-audit, all legacy-Python wheel smokes, and the Rust 1.83 MSRV lane to pass on one final commit. The owner
-    restored $20 of Actions capacity on 2026-09-21; make and validate the formatting fix locally first, then run only
-    the required hosted workflow rather than spending the limited budget on redundant reruns.
-  - [x] Select package version `0.1.2`, greater than the already published/tagged `0.1.1`, update `Cargo.toml`,
-    `pyproject.toml`, and the root package entry in `Cargo.lock` together, and rerun the release workflow's version/tag
-    consistency check. Do not overwrite or relabel the existing `v0.1.1` artifacts.
-  - [ ] Create the matching immutable tag only after CI is green, then let the protected `pypi` environment publish
-    the ABI3 wheels and sdist built from that tag. Verify artifact names, hashes, licenses, imports, and the published
-    version before treating the release as available.
-  - [ ] Update ALES from `pyapplebom==0.1.1` to the new exact release, refresh `poetry.lock`, and pass BOM analyzer,
-    output/ObjectRules, image, SBOM/license, runtime-pruning, and authorized-corpus acceptance.
+No current items.
 
 ## Completed 2026-09-21
 
+- [x] Finish the Rust 1.98.1 release and downstream ALES handoff — **Completed**:
+  - [x] Correct the README formatting failure, select version 0.1.2, and pass the complete local gate set plus the
+    final hosted [CI](https://github.com/bwhitn/pyapplebom/actions/runs/35623948152) and
+    [dependency-security](https://github.com/bwhitn/pyapplebom/actions/runs/35623948083) workflows at immutable
+    revision `b677efe1dee37e7610efc7096286770b6ad3cbf5`, including Rust 1.83 MSRV, Rust 1.98.1, Python 3.8 legacy smoke,
+    native coverage, branch coverage, audits, and every supported wheel platform.
+  - [x] Create immutable tag `v0.1.2` only after CI is green. The protected
+    [trusted-publishing workflow](https://github.com/bwhitn/pyapplebom/actions/runs/35623948163) publishes six ABI3
+    wheels and the sdist to PyPI; every downloaded public artifact matches its workflow hash, retains the required
+    license/SBOM or source files, imports successfully, and reports version 0.1.2.
+  - [x] Update ALES to exact public `pyapplebom==0.1.2`, refresh all seven locked artifact hashes, retain the
+    license/SBOM before and after pruning, and pass its focused and complete host tests plus locked-down test and
+    operational images. The benign BOM emits byte-identical ALES and ObjectRules output versus 0.1.1, its normalized
+    parser output is unchanged, and the 90-iteration in-image median improves 42.03%. No standalone BOM exists in the
+    140-file authorized corpus, so the public benign upstream fixture is the applicable end-to-end replay.
 - [x] Adopt Rust 1.98.1 and optimize measured BOM parsing/projection hot paths — **Completed** ([results](benchmarks/results/2026-09-21-rust-1.98.1.md)):
   - [x] Capture release-mode baselines for generated valid and hostile BOMs covering block validation, path trees,
     optional sections, malformed partial results, and Python projection. Record wall time, CPU, peak memory,
