@@ -2,6 +2,7 @@
 name = "pyapplebom"
 version = "0.1.1"
 edition = "2021"
+rust-version = "1.83"
 license = "MIT"
 description = "Python bindings for parsing Apple BOM files via apple-bom"
 readme = "README.md"
@@ -23,6 +24,7 @@ strip = true
 
 [lints.rust]
 unsafe_code = "forbid"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(test)"] }
 
 [lints.clippy]
 dbg_macro = "deny"

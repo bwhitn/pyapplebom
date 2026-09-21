@@ -27,6 +27,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
+          toolchain: 1.98.1
           components: clippy,llvm-tools-preview,rustfmt
 
       - name: Set up Python
@@ -37,7 +38,7 @@ jobs:
 
       - name: Install project and development dependencies
         run: |
-          python -m pip install --upgrade "pip==26.1.2"
+          python -m pip install --upgrade "pip==26.2"
           python -m pip install -e ".[dev]"
 
       - name: Install native coverage tool
@@ -74,6 +75,24 @@ jobs:
       - name: Test Python with branch coverage
         run: python -m pytest --cov=pyapplebom --cov-report=term-missing
 
+  msrv:
+    name: Rust 1.83 MSRV
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: 1.83.0
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install MSRV
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.83.0
+
+      - name: Check locked dependencies against MSRV
+        run: cargo check --all-targets --all-features --locked
+
   wheel-test:
     name: wheel ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
@@ -90,6 +109,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.98.1
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0

@@ -1,6 +1,6 @@
 use apple_bom::{
     format::{BomBlock, ParsedBom},
-    BomPathType,
+    BomPath, BomPathType,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -64,6 +64,22 @@ struct PathMetric {
     resolution_work: usize,
 }
 
+#[derive(Clone, Copy)]
+struct PathState {
+    entry_index: usize,
+    metric: PathMetric,
+}
+
+struct ValidatedPathEntry<'a> {
+    parent_entry_index: Option<usize>,
+    path_record_index: usize,
+    name: &'a [u8],
+}
+
+struct ValidatedPathTree<'a> {
+    entries: Vec<ValidatedPathEntry<'a>>,
+}
+
 pub(crate) fn validate_container(
     data: &[u8],
     limits: ParseLimits,
@@ -115,13 +131,26 @@ pub(crate) fn validate_bom_info(bom: &ParsedBom<'_>) -> Result<bool, String> {
     Ok(true)
 }
 
+#[cfg(test)]
 pub(crate) fn validate_path_section(
     bom: &ParsedBom<'_>,
     name: &str,
     limits: ParseLimits,
 ) -> Result<bool, String> {
-    let Some(variable_index) = variable_block_index(bom, name) else {
+    let Some(tree_index) = path_section_tree_index(bom, name)? else {
         return Ok(false);
+    };
+
+    validate_path_tree(bom, tree_index, limits)?;
+    Ok(true)
+}
+
+pub(crate) fn path_section_tree_index(
+    bom: &ParsedBom<'_>,
+    name: &str,
+) -> Result<Option<usize>, String> {
+    let Some(variable_index) = variable_block_index(bom, name) else {
+        return Ok(None);
     };
 
     let tree_index = if name == "VIndex" {
@@ -134,8 +163,16 @@ pub(crate) fn validate_path_section(
         variable_index
     };
 
-    validate_path_tree(bom, tree_index, limits)?;
-    Ok(true)
+    Ok(Some(tree_index))
+}
+
+pub(crate) fn parse_path_tree(
+    bom: &ParsedBom<'_>,
+    tree_index: usize,
+    limits: ParseLimits,
+) -> Result<Vec<BomPath>, String> {
+    let validated = validate_path_tree(bom, tree_index, limits)?;
+    materialize_path_tree(bom, &validated)
 }
 
 pub(crate) fn parse_block_safely<'a>(
@@ -345,11 +382,11 @@ fn validate_vars_index(data: &[u8], range: Range<usize>, block_count: usize) -> 
     Ok(())
 }
 
-fn validate_path_tree(
-    bom: &ParsedBom<'_>,
+fn validate_path_tree<'a>(
+    bom: &'a ParsedBom<'_>,
     tree_index: usize,
     limits: ParseLimits,
-) -> Result<(), String> {
+) -> Result<ValidatedPathTree<'a>, String> {
     let tree = block_data(bom, tree_index)?;
     if !tree_layout_is_safe(tree) {
         return Err(format!("tree block {tree_index} is malformed or truncated"));
@@ -365,7 +402,7 @@ fn validate_path_tree(
 
     let mut paths_index = read_u32(tree, 8, "tree paths block index")? as usize;
     let mut root_seen = HashSet::new();
-    loop {
+    let initial_path_count = loop {
         if !root_seen.insert(paths_index) {
             return Err(format!(
                 "cycle detected while resolving root paths block {paths_index}"
@@ -378,7 +415,7 @@ fn validate_path_tree(
         let data = block_data(bom, paths_index)?;
         let header = parse_paths_header(data)?;
         if header.is_path_info != 0 {
-            break;
+            break header.count;
         }
         if header.count == 0 {
             return Err(format!(
@@ -386,10 +423,12 @@ fn validate_path_tree(
             ));
         }
         paths_index = read_u32(data, PATHS_HEADER_LEN, "child paths block index")? as usize;
-    }
+    };
 
     let mut linked_seen = HashSet::new();
-    let mut files_by_id = HashMap::new();
+    let initial_capacity = initial_path_count.min(path_count);
+    let mut files_by_id = HashMap::with_capacity(initial_capacity);
+    let mut entries = Vec::with_capacity(initial_capacity);
     let mut total_paths = 0usize;
     let mut total_path_bytes = 0usize;
     let mut total_resolution_work = 0usize;
@@ -426,12 +465,17 @@ fn validate_path_tree(
             let offset = PATHS_HEADER_LEN + entry_index * PATHS_ENTRY_LEN;
             let path_info_index = read_u32(data, offset, "path info block index")? as usize;
             let file_index = read_u32(data, offset + 4, "file block index")? as usize;
-            let (path_id, metric) =
+            let (path_id, metric, entry) =
                 validate_path_entry(bom, path_info_index, file_index, &files_by_id)?;
 
-            if files_by_id.insert(path_id, metric).is_some() {
+            let state = PathState {
+                entry_index: entries.len(),
+                metric,
+            };
+            if files_by_id.insert(path_id, state).is_some() {
                 return Err(format!("duplicate path identifier {path_id}"));
             }
+            entries.push(entry);
             total_path_bytes = total_path_bytes
                 .checked_add(metric.serialized_len)
                 .ok_or_else(|| "total path size overflows the platform size".to_string())?;
@@ -458,15 +502,15 @@ fn validate_path_tree(
         paths_index = header.next_index;
     }
 
-    Ok(())
+    Ok(ValidatedPathTree { entries })
 }
 
-fn validate_path_entry(
-    bom: &ParsedBom<'_>,
+fn validate_path_entry<'a>(
+    bom: &'a ParsedBom<'_>,
     path_info_index: usize,
     file_index: usize,
-    files_by_id: &HashMap<u32, PathMetric>,
-) -> Result<(u32, PathMetric), String> {
+    files_by_id: &HashMap<u32, PathState>,
+) -> Result<(u32, PathMetric, ValidatedPathEntry<'a>), String> {
     let path_info = block_data(bom, path_info_index)?;
     if path_info.len() < 8 {
         return Err(format!("path info block {path_info_index} is truncated"));
@@ -493,13 +537,14 @@ fn validate_path_entry(
         .checked_mul(3)
         .ok_or_else(|| "path name length overflows the platform size".to_string())?;
 
-    let (full_len, depth, resolution_work) = if parent_id == 0 {
-        (name_len, 1, name_len)
+    let (parent_entry_index, full_len, depth, resolution_work) = if parent_id == 0 {
+        (None, name_len, 1, name_len)
     } else {
         let parent = files_by_id
             .get(&parent_id)
             .ok_or_else(|| format!("path references unknown parent identifier {parent_id}"))?;
         let depth = parent
+            .metric
             .depth
             .checked_add(1)
             .ok_or_else(|| "path depth overflows the platform size".to_string())?;
@@ -509,22 +554,23 @@ fn validate_path_entry(
             ));
         }
         let full_len = parent
+            .metric
             .full_len
             .checked_add(1)
             .and_then(|value| value.checked_add(name_len))
             .ok_or_else(|| "expanded path length overflows the platform size".to_string())?;
-        // The upstream parser rebuilds the path once for every ancestor. Account
-        // for all those intermediate strings so a deep hierarchy cannot turn a
-        // small final output into quadratic work per path.
+        // Retain the historical resolution-work bound even though the optimized
+        // materializer below builds each full path once. This keeps hostile deep
+        // hierarchies within the same documented resource limits.
         let repeated_leaf_work = name_len
             .checked_add(1)
-            .and_then(|value| value.checked_mul(parent.depth))
+            .and_then(|value| value.checked_mul(parent.metric.depth))
             .ok_or_else(|| "path resolution work overflows the platform size".to_string())?;
         let resolution_work = name_len
             .checked_add(repeated_leaf_work)
-            .and_then(|value| value.checked_add(parent.resolution_work))
+            .and_then(|value| value.checked_add(parent.metric.resolution_work))
             .ok_or_else(|| "path resolution work overflows the platform size".to_string())?;
-        (full_len, depth, resolution_work)
+        (Some(parent.entry_index), full_len, depth, resolution_work)
     };
 
     let link_len = if path_record[0] == u8::from(BomPathType::Link) {
@@ -545,7 +591,42 @@ fn validate_path_entry(
         resolution_work,
     };
 
-    Ok((path_id, metric))
+    let entry = ValidatedPathEntry {
+        parent_entry_index,
+        path_record_index,
+        name: name_bytes,
+    };
+
+    Ok((path_id, metric, entry))
+}
+
+fn materialize_path_tree(
+    bom: &ParsedBom<'_>,
+    validated: &ValidatedPathTree<'_>,
+) -> Result<Vec<BomPath>, String> {
+    let mut paths: Vec<BomPath> = Vec::with_capacity(validated.entries.len());
+
+    for entry in &validated.entries {
+        let name = String::from_utf8_lossy(entry.name);
+        let path = if let Some(parent_index) = entry.parent_entry_index {
+            let parent = paths
+                .get(parent_index)
+                .ok_or_else(|| "validated parent path index is out of range".to_string())?;
+            let mut path = String::with_capacity(parent.path().len() + 1 + name.len());
+            path.push_str(parent.path());
+            path.push('/');
+            path.push_str(&name);
+            path
+        } else {
+            name.into_owned()
+        };
+        let record = bom
+            .block_as_path_record(entry.path_record_index)
+            .map_err(|error| error.to_string())?;
+        paths.push(BomPath::from_record(path, &record).map_err(|error| error.to_string())?);
+    }
+
+    Ok(paths)
 }
 
 fn path_entry_layout_is_safe(bom: &ParsedBom<'_>, path_info: u32, file: u32) -> bool {
@@ -847,6 +928,61 @@ mod tests {
         for index in 0..bom.blocks.blocks.len() {
             let _ = parse_block_safely(&bom, index);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn optimized_path_materialization_matches_upstream() -> Result<(), String> {
+        validate_container(FIXTURE, default_limits(), false)?;
+        let bom = ParsedBom::parse(FIXTURE).map_err(|error| error.to_string())?;
+
+        for (name, upstream) in [
+            ("Paths", bom.paths()),
+            ("HLIndex", bom.hl_index()),
+            ("Size64", bom.size64()),
+            ("VIndex", bom.vindex()),
+        ] {
+            let tree_index = path_section_tree_index(&bom, name)?
+                .ok_or_else(|| format!("fixture has no {name} variable"))?;
+            let optimized = parse_path_tree(&bom, tree_index, default_limits())?;
+            let upstream = upstream.map_err(|error| error.to_string())?;
+
+            assert_eq!(optimized.len(), upstream.len());
+            for (actual, expected) in optimized.iter().zip(&upstream) {
+                assert_eq!(actual.path(), expected.path());
+                assert_eq!(u8::from(actual.path_type()), u8::from(expected.path_type()));
+                assert_eq!(actual.file_mode(), expected.file_mode());
+                assert_eq!(actual.symbolic_mode(), expected.symbolic_mode());
+                assert_eq!(actual.user_id(), expected.user_id());
+                assert_eq!(actual.group_id(), expected.group_id());
+                assert_eq!(actual.modified_time(), expected.modified_time());
+                assert_eq!(actual.size(), expected.size());
+                assert_eq!(actual.crc32(), expected.crc32());
+                assert_eq!(actual.link_name(), expected.link_name());
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn materializes_valid_deep_paths_without_rebuilding_ancestors() -> Result<(), String> {
+        let data = deep_path_bom(32)?;
+        let limits = ParseLimits {
+            max_input_bytes: data.len(),
+            max_paths: DEFAULT_MAX_PATHS,
+        };
+        validate_container(&data, limits, false)?;
+        let bom = ParsedBom::parse(&data).map_err(|error| error.to_string())?;
+        let tree_index = path_section_tree_index(&bom, "Paths")?
+            .ok_or_else(|| "generated BOM has no Paths variable".to_string())?;
+        let paths = parse_path_tree(&bom, tree_index, limits)?;
+
+        assert_eq!(paths.len(), 32);
+        let last = paths
+            .last()
+            .ok_or_else(|| "generated path output is empty".to_string())?;
+        assert_eq!(last.path().split('/').count(), 32);
         Ok(())
     }
 

@@ -30,8 +30,12 @@ pip install pyapplebom
 Prerequisites:
 
 - Python 3.8+
-- Rust toolchain (stable)
+- Rust 1.98.1 (pinned by `rust-toolchain.toml`)
 - `pip`
+
+Rust 1.83 is the separately tested minimum supported Rust version (MSRV). Release artifacts and the
+primary development/CI checks use Rust 1.98.1; changing the MSRV does not change the release
+toolchain.
 
 Install:
 
@@ -86,6 +90,11 @@ The defaults are exported as `pyapplebom.DEFAULT_MAX_INPUT_BYTES` and `pyapplebo
 ## Security Model
 
 BOM files are treated as untrusted binary input. Before invoking the upstream parser, `pyapplebom` validates the file magic, index and block ranges, count-to-size relationships, path references, traversal cycles, expanded path data, and configured resource limits. Unexpected upstream Rust panics are contained and converted into parse errors.
+
+Validated path plans are materialized directly in one linear pass, so path strings are not rebuilt
+for every ancestor and repeated references to the same path tree reuse the native result. Each
+Python section still receives a distinct list, and all prevalidation and resource limits remain in
+force.
 
 Invalid top-level layout and resource amplification raise `BomParseError`. An invalid optional section such as `Paths` is returned as `None` with details in `parse_errors`, allowing safe metadata from other sections to remain available. Resource limits bound in-process work; they are not an operating-system sandbox for adversarial parsing.
 
@@ -144,6 +153,22 @@ cargo audit --deny warnings --file Cargo.lock
 
 CI additionally measures `src/validation.rs` with `cargo-llvm-cov` and requires at least 80% line coverage. Python branch coverage is required to remain at 100%.
 
+Verify the declared MSRV separately:
+
+```bash
+RUSTUP_TOOLCHAIN=1.83.0 cargo check --all-targets --all-features --locked
+```
+
+Run the deterministic release-mode performance suite after `maturin develop --release --locked`:
+
+```bash
+python benchmarks/benchmark.py --label local --output /tmp/pyapplebom-benchmark.json
+```
+
+The benchmark methodology and recorded Rust 1.98.1 comparison are in
+[`benchmarks/README.md`](benchmarks/README.md) and
+[`benchmarks/results/2026-09-21-rust-1.98.1.md`](benchmarks/results/2026-09-21-rust-1.98.1.md).
+
 ## Build and Publish (manual PyPI workflow)
 
 Build wheels and source distribution:
@@ -175,6 +200,7 @@ This repo includes a release workflow at `.github/workflows/release.yml` that:
 ## Compatibility Notes
 
 - Uses `pyo3` with `abi3` (`abi3-py38`) for broad CPython binary compatibility.
+- Uses Rust 1.98.1 for primary CI and release builds, with Rust 1.83 checked as the Cargo MSRV.
 - CI runs dependency-free installed-wheel smoke tests on Python 3.8 and the full test suite on a maintained Python release.
 - No platform-specific runtime logic is required for parsing.
 - Build targets are suitable for Windows, Linux, and macOS when compiled on those platforms.
